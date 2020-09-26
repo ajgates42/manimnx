@@ -25,7 +25,7 @@ def get_dot_node(n, G):
 
     """
     n = G.nodes[n]
-    node = Dot(color=n.get('color', RED))
+    node = Dot(color=n.get('color', RED), radius=n.get('radius', DEFAULT_DOT_RADIUS))
     x, y = n['pos']
     node.move_to(x*RIGHT + y*UP)
     return node
@@ -55,6 +55,33 @@ def get_line_edge(ed, G):
     end = x2*RIGHT + y2*UP
     return Line(start, end, color=n1.get('color', WHITE))
 
+def get_arrow_edge(ed, G):
+    """Create an arrow edge from source (node n1) to target (node n2) using the color of the source.
+
+    Uses WHITE by default.
+
+    Parameters
+    ----------
+    ed:
+        Edge key for the networkx graph G.
+
+    Returns
+    -------
+    Line
+        The Line VMobject.
+
+    """
+    n1 = G.nodes[ed[0]]
+    n2 = G.nodes[ed[1]]
+    x1 = np.hstack([n1['pos'], [0]])
+    x2 = np.hstack([n2['pos'], [0]])
+    screenscale = np.array([RIGHT, UP])
+
+    u = (x2 - x1)/np.sqrt(np.square(x2 - x1).sum())
+
+    #start = x1*RIGHT + y1*UP
+    #end = (x2 + np.sign(x2-x1)*n2['radius'])*RIGHT + (y2 + np.sign(y2-y1)*n2['radius'])*UP
+    return Arrow(x1, (x2 - 0.5*n2['radius']*u), color=n1.get('color', WHITE))
 # %%
 
 
@@ -113,10 +140,14 @@ class ManimGraph(VGroup):
 
     def __init__(self, graph,
                  get_node=get_dot_node,
-                 get_edge=get_line_edge, **kwargs):
+                 get_edge=None, **kwargs):
         super().__init__(**kwargs)
         self.graph = graph
-        self.get_edge = get_edge
+        if get_edge is None and nx.is_directed(self.graph):
+            self.get_edge=get_arrow_edge
+        elif get_edge is None:
+            self.get_edge=get_line_edge
+
         self.get_node = get_node
 
         self.nodes = {}
@@ -172,8 +203,6 @@ class ManimGraph(VGroup):
         self.id_to_node[g.nodes[new]['mob_id']] = new
 
 # %%
-
-
 class TransformAndRemoveSource(Transform):
     def clean_up_from_scene(self, scene):
         super().clean_up_from_scene(scene)
@@ -232,30 +261,6 @@ def transform_graph(mng, G,
     # just copying the loops for edges and nodes, not worth functioning that
     # i think
     # ------- ADDITIONS AND DIRECT TRANSFORMS ---------
-    # NODES
-    for node, node_data in G.nodes.items():
-        new_node = mng.get_node(node, G)
-        if 'mob_id' not in node_data.keys():
-            G.nodes[node]['mob_id'] = mng.count
-            mng.count += 1
-
-        mob_id = node_data['mob_id']
-        new_ids.append(mob_id)
-
-        if mob_id in old_ids:
-            # if mng.graph.nodes[mng.id_to_node[mob_id]] != node_data:
-            anims.append(node_transform(mng.nodes[mob_id], new_node))
-        else:
-            if 'expansion' in node_data.keys():
-                objs = [id_to_mobj[o['mob_id']]
-                        for o in node_data['expansion'].values()]
-                anims.append(TransformFromCopy(VGroup(*objs), new_node))
-            else:
-                anims.append(FadeIn(new_node))
-
-            mng.nodes[mob_id] = new_node
-            mng.add(new_node)
-            mng.id_to_node[mob_id] = node
 
     # EDGES
     for edge, edge_data in G.edges.items():
@@ -285,7 +290,61 @@ def transform_graph(mng, G,
             mng.add_to_back(new_edge)
             mng.id_to_edge[mob_id] = edge
 
+    # NODES
+    for node, node_data in G.nodes.items():
+        new_node = mng.get_node(node, G)
+        if 'mob_id' not in node_data.keys():
+            G.nodes[node]['mob_id'] = mng.count
+            mng.count += 1
+
+        mob_id = node_data['mob_id']
+        new_ids.append(mob_id)
+
+        if mob_id in old_ids:
+            # if mng.graph.nodes[mng.id_to_node[mob_id]] != node_data:
+            anims.append(node_transform(mng.nodes[mob_id], new_node))
+        else:
+            if 'expansion' in node_data.keys():
+                objs = [id_to_mobj[o['mob_id']]
+                        for o in node_data['expansion'].values()]
+                anims.append(TransformFromCopy(VGroup(*objs), new_node))
+            else:
+                anims.append(FadeIn(new_node))
+
+            mng.nodes[mob_id] = new_node
+            mng.add(new_node)
+            mng.id_to_node[mob_id] = node
+
     # --------- REMOVALS AND CONTRACTIONS ----------
+    # EDGES
+    for edge, edge_data in mng.graph.edges.items():
+        mob_id = edge_data['mob_id']
+        if mob_id in new_ids:
+            continue
+
+        contracts_to = []
+        for edge2, edge_data in G.edges.items():
+            for c2 in edge_data.get('contraction', {}).values():
+                if mob_id == c2['mob_id']:
+                    contracts_to.append(
+                        mng.get_edge(mng.id_to_edge[edge_data['mob_id']], G)
+                    )
+                    break
+
+        mobj = id_to_mobj[mob_id]
+        if len(contracts_to) == 0:
+            anims.append(FadeOut(mobj))
+        else:
+            anims.append(TransformAndRemoveSource(mobj, VGroup(*contracts_to)))
+
+        # mng.remove(mobj)
+        del mng.edges[mob_id]
+        del mng.id_to_edge[mob_id]
+
+    mng.graph = G
+    return anims
+
+
     # NODES
     for node, node_data in mng.graph.nodes.items():
         mob_id = node_data['mob_id']
@@ -315,34 +374,7 @@ def transform_graph(mng, G,
         del mng.nodes[mob_id]
         del mng.id_to_node[mob_id]
 
-    # EDGES
-    for edge, edge_data in mng.graph.edges.items():
-        mob_id = edge_data['mob_id']
-        if mob_id in new_ids:
-            continue
-
-        contracts_to = []
-        for edge2, edge_data in G.edges.items():
-            for c2 in edge_data.get('contraction', {}).values():
-                if mob_id == c2['mob_id']:
-                    contracts_to.append(
-                        mng.get_edge(mng.id_to_edge[edge_data['mob_id']], G)
-                    )
-                    break
-
-        mobj = id_to_mobj[mob_id]
-        if len(contracts_to) == 0:
-            anims.append(FadeOut(mobj))
-        else:
-            anims.append(TransformAndRemoveSource(mobj, VGroup(*contracts_to)))
-
-        # mng.remove(mobj)
-        del mng.edges[mob_id]
-        del mng.id_to_edge[mob_id]
-
-    mng.graph = G
-    return anims
-
+    
 
 # %%
 def shift_nodes(nodes, shift, fg):
